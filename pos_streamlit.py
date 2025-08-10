@@ -352,30 +352,48 @@ if selected_symbol != "Select a symbol...":
     right_col.markdown(f"**UPNL (USD):** {badge_upnl(sel_row['UPNL (USD)'])}", unsafe_allow_html=True)
     right_col.markdown(f"**Mark Price:** {sel_row['Mark Price']}")
 
-    with right_col.form("alert_form"):
+    with right_col.form("alert_form", clear_on_submit=True):
         criteria_choice = st.selectbox("Criteria", ["UPNL (USD)", "Mark Price"])
         condition_choice = st.selectbox("Condition", [">=", "<="])
-        threshold_value = st.number_input("Threshold", format="%.2f")
+        threshold_value = st.number_input("Threshold", format="%.2f", value=0.0)
         
-        if st.form_submit_button("💾 Save Alert"):
-            # Add alert to session state with Active status
-            st.session_state.alerts.append({
-                "symbol": selected_symbol,
-                "criteria": criteria_choice,
-                "condition": condition_choice,
-                "threshold": threshold_value,
-                "status": "Active"
-            })
+        submitted = st.form_submit_button("💾 Save Alert")
+        
+        if submitted and threshold_value != 0.0:
+            # Check for duplicate alerts
+            duplicate = False
+            for existing_alert in st.session_state.alerts:
+                if (existing_alert["symbol"] == selected_symbol and 
+                    existing_alert["criteria"] == criteria_choice and
+                    existing_alert["condition"] == condition_choice and
+                    existing_alert["threshold"] == threshold_value):
+                    duplicate = True
+                    break
             
-            # Update Google Sheets
-            if update_google_sheet():
-                st.success("Alert saved and uploaded to Google Sheets!")
+            if not duplicate:
+                # Add alert to session state with Active status
+                new_alert = {
+                    "symbol": selected_symbol,
+                    "criteria": criteria_choice,
+                    "condition": condition_choice,
+                    "threshold": threshold_value,
+                    "status": "Active"
+                }
+                st.session_state.alerts.append(new_alert)
+                
+                # Update Google Sheets
+                if update_google_sheet():
+                    st.success("✅ Alert saved and synced to Google Sheets!")
+                else:
+                    st.error("❌ Alert saved locally, but failed to sync to Google Sheets")
+                
+                # Reset form
+                time.sleep(1)  # Brief delay before rerun
+                st.experimental_rerun()
             else:
-                st.error("Alert saved locally, but failed to upload to Google Sheets")
-            
-            # Reset the selector
-            st.session_state.symbol_selector = "Select a symbol..."
-            st.experimental_rerun()
+                st.warning("⚠️ This exact alert already exists!")
+        elif submitted and threshold_value == 0.0:
+            st.warning("⚠️ Please enter a non-zero threshold value!")
 else:
     right_col.info("👆 Select a symbol above to create an alert")
 
@@ -400,14 +418,14 @@ with alert_col1:
                 cols[0].write(alert_text)
                 
                 # Deactivate button
-                if cols[1].button("⏸️", key=f"deactivate_alert_{i}", help="Deactivate"):
+                if cols[1].button("⏸️", key=f"deactivate_{alert['symbol']}_{i}", help="Deactivate"):
                     st.session_state.alerts[i]["status"] = "Inactive"
                     if update_google_sheet():
                         st.success("Alert deactivated!")
                     st.experimental_rerun()
                 
                 # Delete button
-                if cols[2].button("❌", key=f"delete_alert_{i}", help="Delete"):
+                if cols[2].button("❌", key=f"delete_{alert['symbol']}_{i}", help="Delete"):
                     st.session_state.alerts.pop(i)
                     if update_google_sheet():
                         st.success("Alert deleted!")
@@ -426,14 +444,14 @@ with alert_col2:
                 cols[0].write(alert_text)
                 
                 # Reactivate button
-                if cols[1].button("▶️", key=f"reactivate_alert_{i}", help="Reactivate"):
+                if cols[1].button("▶️", key=f"reactivate_{alert['symbol']}_{i}", help="Reactivate"):
                     st.session_state.alerts[i]["status"] = "Active"
                     if update_google_sheet():
                         st.success("Alert reactivated!")
                     st.experimental_rerun()
                 
                 # Delete button
-                if cols[2].button("❌", key=f"delete_inactive_alert_{i}", help="Delete"):
+                if cols[2].button("❌", key=f"delete_inactive_{alert['symbol']}_{i}", help="Delete"):
                     st.session_state.alerts.pop(i)
                     if update_google_sheet():
                         st.success("Alert deleted!")
