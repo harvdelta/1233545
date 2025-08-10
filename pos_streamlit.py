@@ -7,6 +7,8 @@ import re
 import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+import gspread
+import json
 
 # Auto-refresh every 3 seconds
 st_autorefresh(interval=3000)
@@ -18,6 +20,62 @@ API_SECRET = st.secrets["DELTA_API_SECRET"]
 BASE_URL = st.secrets.get("DELTA_BASE_URL", "https://api.india.delta.exchange")
 TG_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
+
+# Google Sheets Config
+GOOGLE_SHEET_ID = st.secrets["GOOGLE_SHEET_ID"]
+GOOGLE_CREDENTIALS = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+
+# ---------- Google Sheets Functions ----------
+@st.cache_resource
+def get_google_client():
+    """Initialize Google Sheets client with credentials"""
+    try:
+        gc = gspread.service_account_from_dict(GOOGLE_CREDENTIALS)
+        return gc
+    except Exception as e:
+        st.error(f"Failed to initialize Google Sheets client: {e}")
+        return None
+
+def update_google_sheet():
+    """Update Google Sheets with current alerts"""
+    try:
+        gc = get_google_client()
+        if not gc:
+            return False
+            
+        # Open the spreadsheet
+        sheet = gc.open_by_key(GOOGLE_SHEET_ID)
+        
+        # Try to get the worksheet, create if it doesn't exist
+        try:
+            worksheet = sheet.worksheet("Delta Alerts")
+        except gspread.WorksheetNotFound:
+            worksheet = sheet.add_worksheet(title="Delta Alerts", rows="100", cols="10")
+        
+        # Prepare data with headers
+        headers = ["Symbol", "Criteria", "Condition", "Threshold"]
+        data = [headers]
+        
+        # Add current alerts
+        for alert in st.session_state.alerts:
+            row = [
+                alert["symbol"],
+                alert["criteria"], 
+                alert["condition"],
+                alert["threshold"]
+            ]
+            data.append(row)
+        
+        # Clear existing content and write new data
+        worksheet.clear()
+        if data:
+            worksheet.update(range_name="A1", values=data)
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error updating Google Sheets: {e}")
+        return False
 
 # ---------- helpers ----------
 def sign_request(method: str, path: str, payload: str, timestamp: str) -> str:
@@ -169,6 +227,8 @@ if "triggered" not in st.session_state:
     st.session_state.triggered = set()
 if "edit_symbol" not in st.session_state:
     st.session_state.edit_symbol = None
+if "sheets_updated" not in st.session_state:
+    st.session_state.sheets_updated = False
 
 # ---------- ALERT CHECK ----------
 for alert in st.session_state.alerts:
@@ -193,24 +253,11 @@ st.markdown("""
 .symbol-cell {text-align: left !important; font-weight: bold; font-family: monospace;}
 .alert-btn {background-color: transparent; border: 1px solid #666; border-radius: 6px; padding: 0 8px; font-size: 18px; cursor: pointer; color: #aaa;}
 .alert-btn:hover {background-color: #444;}
+.sheets-status {padding: 8px; border-radius: 4px; margin: 8px 0; text-align: center; font-weight: bold;}
+.sheets-success {background-color: #4CAF50; color: white;}
+.sheets-error {background-color: #F44336; color: white;}
 </style>
 """, unsafe_allow_html=True)
-
-# Handle button clicks through URL parameters
-query_params = st.query_params
-if "edit_symbol" in query_params:
-    st.session_state.edit_symbol = query_params["edit_symbol"]
-    # Clear the URL parameter
-    st.query_params.clear()
-elif "delete_alert" in query_params:
-    try:
-        alert_index = int(query_params["delete_alert"])
-        if 0 <= alert_index < len(st.session_state.alerts):
-            st.session_state.alerts.pop(alert_index)
-        st.query_params.clear()
-        st.rerun()
-    except (ValueError, IndexError):
-        st.query_params.clear()
 
 # ---------- LAYOUT ----------
 left_col, right_col = st.columns([4, 1])
@@ -231,12 +278,7 @@ if not df.empty:
                 table_html += f"<td>{badge_upnl(row[col])}</td>"
             else:
                 table_html += f"<td>{row[col]}</td>"
-        
-        # Create clickable + button that updates URL in same tab
-        symbol_encoded = row['Symbol'].replace(' ', '%20').replace('&', '%26')
-        table_html += f"""<td><a href="?edit_symbol={symbol_encoded}" 
-                         target="_self" style="text-decoration: none;">
-                         <span class='alert-btn'>+</span></a></td>"""
+        table_html += f"<td><button class='alert-btn' onclick=\"window.location.href='?edit_symbol={row['Symbol']}'\">+</button></td>"
         table_html += "</tr>"
 
     table_html += "</tbody></table>"
@@ -244,61 +286,79 @@ if not df.empty:
 
 # --- RIGHT: ALERT EDITOR ---
 if st.session_state.edit_symbol:
-    # Find the row for the selected symbol
-    matching_rows = df[df["Symbol"] == st.session_state.edit_symbol]
-    if not matching_rows.empty:
-        sel_row = matching_rows.iloc[0]
-        upnl_val = float(sel_row["UPNL (USD)"]) if sel_row["UPNL (USD)"] else 0
-        header_bg = "#4CAF50" if upnl_val > 0 else "#F44336" if upnl_val < 0 else "#999"
-        right_col.markdown(f"<div style='background:{header_bg};padding:10px;border-radius:8px'><b>Create Alert</b></div>", unsafe_allow_html=True)
-        right_col.markdown(f"**Symbol:** {st.session_state.edit_symbol}")
-        right_col.markdown(f"**UPNL (USD):** {badge_upnl(sel_row['UPNL (USD)'])}", unsafe_allow_html=True)
-        right_col.markdown(f"**Mark Price:** {sel_row['Mark Price']}")
+    sel_row = df[df["Symbol"] == st.session_state.edit_symbol].iloc[0]
+    upnl_val = float(sel_row["UPNL (USD)"]) if sel_row["UPNL (USD)"] else 0
+    header_bg = "#4CAF50" if upnl_val > 0 else "#F44336" if upnl_val < 0 else "#999"
+    right_col.markdown(f"<div style='background:{header_bg};padding:10px;border-radius:8px'><b>Create Alert</b></div>", unsafe_allow_html=True)
+    right_col.markdown(f"**Symbol:** {st.session_state.edit_symbol}")
+    right_col.markdown(f"**UPNL (USD):** {badge_upnl(sel_row['UPNL (USD)'])}", unsafe_allow_html=True)
+    right_col.markdown(f"**Mark Price:** {sel_row['Mark Price']}")
 
-        with right_col.form("alert_form"):
-            criteria_choice = st.selectbox("Criteria", ["UPNL (USD)", "Mark Price"])
-            condition_choice = st.selectbox("Condition", [">=", "<="])
-            threshold_value = st.number_input("Threshold", format="%.2f")
+    with right_col.form("alert_form"):
+        criteria_choice = st.selectbox("Criteria", ["UPNL (USD)", "Mark Price"])
+        condition_choice = st.selectbox("Condition", [">=", "<="])
+        threshold_value = st.number_input("Threshold", format="%.2f")
+        if st.form_submit_button("Save Alert"):
+            # Add alert to session state
+            st.session_state.alerts.append({
+                "symbol": st.session_state.edit_symbol,
+                "criteria": criteria_choice,
+                "condition": condition_choice,
+                "threshold": threshold_value
+            })
             
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.form_submit_button("Save Alert"):
-                    st.session_state.alerts.append({
-                        "symbol": st.session_state.edit_symbol,
-                        "criteria": criteria_choice,
-                        "condition": condition_choice,
-                        "threshold": threshold_value
-                    })
-                    st.session_state.edit_symbol = None
-                    st.rerun()
-            with col2:
-                if st.form_submit_button("Cancel"):
-                    st.session_state.edit_symbol = None
-                    st.rerun()
-    else:
-        right_col.error("Symbol not found")
-        st.session_state.edit_symbol = None
+            # Update Google Sheets
+            if update_google_sheet():
+                st.success("Alert saved and uploaded to Google Sheets!")
+            else:
+                st.error("Alert saved locally, but failed to upload to Google Sheets")
+            
+            st.session_state.edit_symbol = None
+            st.experimental_rerun()
 else:
-    right_col.info("Click + button on any row to create alert")
+    right_col.info("Select a contract to set an alert")
 
 # --- ACTIVE ALERTS ---
 st.subheader("Active Alerts")
-if st.session_state.alerts:
-    # Create alerts table HTML with simpler structure
-    alerts_html = "<table class='full-width-table'><thead><tr>"
-    alerts_html += "<th>SYMBOL</th><th>CRITERIA</th><th>CONDITION</th><th>THRESHOLD</th><th>DELETE</th>"
-    alerts_html += "</tr></thead><tbody>"
-    
-    for i, alert in enumerate(st.session_state.alerts):
-        alerts_html += "<tr>"
-        alerts_html += f"<td class='symbol-cell'>{alert['symbol']}</td>"
-        alerts_html += f"<td>{alert['criteria']}</td>"
-        alerts_html += f"<td>{alert['condition']}</td>"
-        alerts_html += f"<td>{alert['threshold']}</td>"
-        alerts_html += f"<td><a href='?delete_alert={i}' target='_self' style='text-decoration: none;'><span style='color:#F44336;font-size:18px;cursor:pointer;'>❌</span></a></td>"
-        alerts_html += "</tr>"
-    
-    alerts_html += "</tbody></table>"
-    st.markdown(alerts_html, unsafe_allow_html=True)
-else:
-    st.write("No active alerts.")
+
+# Show Google Sheets status
+col1, col2 = st.columns([3, 1])
+with col1:
+    if st.session_state.alerts:
+        for i, alert in enumerate(st.session_state.alerts):
+            cols = st.columns([5, 1])
+            alert_text = f"{alert['symbol']} | {alert['criteria']} {alert['condition']} {alert['threshold']}"
+            cols[0].write(alert_text)
+            if cols[1].button("❌", key=f"remove_alert_{i}"):
+                st.session_state.alerts.pop(i)
+                # Update Google Sheets after deletion
+                if update_google_sheet():
+                    st.success("Alert deleted and Google Sheets updated!")
+                else:
+                    st.error("Alert deleted locally, but failed to update Google Sheets")
+                st.experimental_rerun()
+    else:
+        st.write("No active alerts.")
+
+with col2:
+    if st.button("🔄 Sync to Sheets"):
+        if update_google_sheet():
+            st.success("✅ Synced!")
+        else:
+            st.error("❌ Sync failed")
+
+# --- GOOGLE SHEETS CONNECTION STATUS ---
+st.sidebar.subheader("Google Sheets Status")
+try:
+    gc = get_google_client()
+    if gc:
+        sheet = gc.open_by_key(GOOGLE_SHEET_ID)
+        st.sidebar.success(f"✅ Connected to: {sheet.title}")
+        st.sidebar.info(f"📊 Total alerts: {len(st.session_state.alerts)}")
+    else:
+        st.sidebar.error("❌ Connection failed")
+except Exception as e:
+    st.sidebar.error(f"❌ Error: {str(e)[:50]}...")
+
+# Show sheet link
+st.sidebar.markdown(f"[📋 Open Google Sheet](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
