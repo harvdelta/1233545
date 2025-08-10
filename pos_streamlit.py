@@ -278,19 +278,26 @@ if not df.empty:
                 table_html += f"<td>{badge_upnl(row[col])}</td>"
             else:
                 table_html += f"<td>{row[col]}</td>"
-        table_html += f"<td><button class='alert-btn' onclick=\"window.location.href='?edit_symbol={row['Symbol']}'\">+</button></td>"
+        table_html += f"<td><button class='alert-btn' onclick=\"alert('Click the + button in the right column for {row['Symbol']}')\">+</button></td>"
         table_html += "</tr>"
 
     table_html += "</tbody></table>"
     left_col.markdown(table_html, unsafe_allow_html=True)
 
 # --- RIGHT: ALERT EDITOR ---
-if st.session_state.edit_symbol:
-    sel_row = df[df["Symbol"] == st.session_state.edit_symbol].iloc[0]
+right_col.subheader("Create Alert")
+
+# Symbol selector
+symbol_options = ["Select a symbol..."] + df["Symbol"].tolist()
+selected_symbol = right_col.selectbox("Choose Symbol", symbol_options, key="symbol_selector")
+
+if selected_symbol != "Select a symbol...":
+    # Get selected row data
+    sel_row = df[df["Symbol"] == selected_symbol].iloc[0]
     upnl_val = float(sel_row["UPNL (USD)"]) if sel_row["UPNL (USD)"] else 0
     header_bg = "#4CAF50" if upnl_val > 0 else "#F44336" if upnl_val < 0 else "#999"
-    right_col.markdown(f"<div style='background:{header_bg};padding:10px;border-radius:8px'><b>Create Alert</b></div>", unsafe_allow_html=True)
-    right_col.markdown(f"**Symbol:** {st.session_state.edit_symbol}")
+    
+    right_col.markdown(f"<div style='background:{header_bg};padding:10px;border-radius:8px;margin:10px 0;'><b>{selected_symbol}</b></div>", unsafe_allow_html=True)
     right_col.markdown(f"**UPNL (USD):** {badge_upnl(sel_row['UPNL (USD)'])}", unsafe_allow_html=True)
     right_col.markdown(f"**Mark Price:** {sel_row['Mark Price']}")
 
@@ -298,10 +305,11 @@ if st.session_state.edit_symbol:
         criteria_choice = st.selectbox("Criteria", ["UPNL (USD)", "Mark Price"])
         condition_choice = st.selectbox("Condition", [">=", "<="])
         threshold_value = st.number_input("Threshold", format="%.2f")
-        if st.form_submit_button("Save Alert"):
+        
+        if st.form_submit_button("💾 Save Alert"):
             # Add alert to session state
             st.session_state.alerts.append({
-                "symbol": st.session_state.edit_symbol,
+                "symbol": selected_symbol,
                 "criteria": criteria_choice,
                 "condition": condition_choice,
                 "threshold": threshold_value
@@ -313,10 +321,11 @@ if st.session_state.edit_symbol:
             else:
                 st.error("Alert saved locally, but failed to upload to Google Sheets")
             
-            st.session_state.edit_symbol = None
+            # Reset the selector
+            st.session_state.symbol_selector = "Select a symbol..."
             st.experimental_rerun()
 else:
-    right_col.info("Select a contract to set an alert")
+    right_col.info("👆 Select a symbol above to create an alert")
 
 # --- ACTIVE ALERTS ---
 st.subheader("Active Alerts")
