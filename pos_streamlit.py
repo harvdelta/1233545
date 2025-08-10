@@ -36,6 +36,52 @@ def get_google_client():
         st.error(f"Failed to initialize Google Sheets client: {e}")
         return None
 
+def load_alerts_from_sheet():
+    """Load alerts from Google Sheets into session state"""
+    try:
+        gc = get_google_client()
+        if not gc:
+            return False
+            
+        # Open the spreadsheet
+        sheet = gc.open_by_key(GOOGLE_SHEET_ID)
+        
+        # Try to get the worksheet
+        try:
+            worksheet = sheet.worksheet("Delta Alerts")
+        except gspread.WorksheetNotFound:
+            # Sheet doesn't exist, no alerts to load
+            return True
+        
+        # Get all values
+        values = worksheet.get_all_values()
+        
+        # Skip if empty or only headers
+        if len(values) <= 1:
+            return True
+            
+        # Parse alerts (skip header row)
+        loaded_alerts = []
+        for row in values[1:]:  # Skip header
+            if len(row) >= 4 and row[0]:  # Make sure row has data
+                try:
+                    loaded_alerts.append({
+                        "symbol": row[0],
+                        "criteria": row[1],
+                        "condition": row[2],
+                        "threshold": float(row[3])
+                    })
+                except (ValueError, IndexError):
+                    continue  # Skip invalid rows
+        
+        # Update session state
+        st.session_state.alerts = loaded_alerts
+        return True
+        
+    except Exception as e:
+        st.error(f"Error loading from Google Sheets: {e}")
+        return False
+
 def update_google_sheet():
     """Update Google Sheets with current alerts"""
     try:
