@@ -9,6 +9,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import gspread
 import json
+from datetime import datetime
 
 # Auto-refresh every 15 seconds
 st_autorefresh(interval=15000)
@@ -63,19 +64,20 @@ def load_alerts_from_sheet():
         # Parse alerts (skip header row)
         loaded_alerts = []
         for row in values[1:]:  # Skip header
-            if len(row) >= 5 and row[0]:  # Make sure row has data (now 5 columns)
+            if len(row) >= 6 and row[0]:  # Now expecting 6 columns with triggered_at
                 try:
                     loaded_alerts.append({
                         "symbol": row[0],
                         "criteria": row[1],
                         "condition": row[2],
                         "threshold": float(row[3]),
-                        "status": row[4] if len(row) > 4 else "Active"  # Default to Active
+                        "status": row[4] if len(row) > 4 else "Active",
+                        "triggered_at": row[5] if len(row) > 5 else None
                     })
                 except (ValueError, IndexError):
                     continue  # Skip invalid rows
         
-        # Update session state with all alerts (active and inactive)
+        # Update session state with all alerts
         st.session_state.alerts = loaded_alerts
         return True
         
@@ -99,18 +101,19 @@ def update_google_sheet():
         except gspread.WorksheetNotFound:
             worksheet = sheet.add_worksheet(title="Delta Alerts", rows="100", cols="10")
         
-        # Prepare data with headers (now includes Status column)
-        headers = ["Symbol", "Criteria", "Condition", "Threshold", "Status"]
+        # Prepare data with headers (now includes triggered_at column)
+        headers = ["Symbol", "Criteria", "Condition", "Threshold", "Status", "Triggered At"]
         data = [headers]
         
-        # Add current alerts (both active and inactive)
+        # Add current alerts
         for alert in st.session_state.alerts:
             row = [
                 alert["symbol"],
                 alert["criteria"], 
                 alert["condition"],
                 alert["threshold"],
-                alert.get("status", "Active")  # Default to Active if no status
+                alert.get("status", "Active"),
+                alert.get("triggered_at", "")
             ]
             data.append(row)
         
@@ -202,6 +205,66 @@ def badge_upnl(val):
     else:
         return f"<span style='padding:4px 8px;border-radius:6px;background:#999;color:white;font-weight:bold;'>{num:.2f}</span>"
 
+def create_alert_id(alert):
+    """Create unique ID for alert tracking"""
+    return f"{alert['symbol']}_{alert['criteria']}_{alert['condition']}_{alert['threshold']}"
+
+def check_and_trigger_alerts(df):
+    """Check alerts and trigger only once, then auto-deactivate"""
+    alerts_triggered = 0
+    
+    for i, alert in enumerate(st.session_state.alerts):
+        # Only check active alerts
+        if alert.get("status", "Active") != "Active":
+            continue
+            
+        # Find matching row in dataframe
+        row = df[df["Symbol"] == alert["symbol"]]
+        if row.empty:
+            continue
+            
+        # Get current value
+        val_str = row.iloc[0].get(alert["criteria"])
+        try:
+            current_value = float(val_str)
+        except:
+            continue
+        
+        # Check if condition is met
+        condition_met = False
+        if alert["condition"] == ">=":
+            condition_met = current_value >= alert["threshold"]
+        else:  # "<="
+            condition_met = current_value <= alert["threshold"]
+        
+        # If condition is met, trigger alert and deactivate
+        if condition_met:
+            # Create alert message
+            alert_msg = (f"🚨 ALERT TRIGGERED!\n"
+                        f"Symbol: {alert['symbol']}\n"
+                        f"Condition: {alert['criteria']} {alert['condition']} {alert['threshold']}\n"
+                        f"Current Value: {current_value:.2f}\n"
+                        f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Send telegram notification
+            send_telegram_message(alert_msg)
+            
+            # Show alert in Streamlit
+            st.error(f"🚨 ALERT: {alert['symbol']} - {alert['criteria']} is {current_value:.2f} ({alert['condition']} {alert['threshold']})")
+            
+            # Auto-deactivate the alert
+            st.session_state.alerts[i]["status"] = "Triggered"
+            st.session_state.alerts[i]["triggered_at"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            alerts_triggered += 1
+    
+    # Update Google Sheets if any alerts were triggered
+    if alerts_triggered > 0:
+        update_google_sheet()
+        st.success(f"✅ {alerts_triggered} alert(s) triggered and auto-deactivated!")
+    
+    return alerts_triggered
+
 # ---------- fetch data ----------
 positions_j = api_get("/v2/positions/margined")
 positions = positions_j.get("result", []) if isinstance(positions_j, dict) else []
@@ -271,8 +334,6 @@ df = df.sort_values(by="UPNL (USD)", key=lambda x: x.map(lambda v: abs(float(v))
 # ---------- STATE ----------
 if "alerts" not in st.session_state:
     st.session_state.alerts = []
-if "triggered" not in st.session_state:
-    st.session_state.triggered = set()
 if "edit_symbol" not in st.session_state:
     st.session_state.edit_symbol = None
 if "sheets_updated" not in st.session_state:
@@ -281,19 +342,9 @@ if "sheets_updated" not in st.session_state:
 # Load alerts from Google Sheets on every refresh (auto-sync)
 load_alerts_from_sheet()
 
-# ---------- ALERT CHECK ----------
-for alert in st.session_state.alerts:
-    row = df[df["Symbol"] == alert["symbol"]]
-    if row.empty:
-        continue
-    val_str = row.iloc[0].get(alert["criteria"])
-    try:
-        val = float(val_str)
-    except:
-        continue
-    cond = (val >= alert["threshold"]) if alert["condition"] == ">=" else (val <= alert["threshold"])
-    if cond:
-        send_telegram_message(f"ALERT: {alert['symbol']} {alert['criteria']} {alert['condition']} {alert['threshold']}")
+# ---------- SMART ALERT CHECK (FIRE ONCE ONLY) ----------
+# This replaces your old alert checking logic
+alerts_triggered = check_and_trigger_alerts(df)
 
 # ---------- CSS ----------
 st.markdown("""
@@ -307,6 +358,10 @@ st.markdown("""
 .sheets-status {padding: 8px; border-radius: 4px; margin: 8px 0; text-align: center; font-weight: bold;}
 .sheets-success {background-color: #4CAF50; color: white;}
 .sheets-error {background-color: #F44336; color: white;}
+.status-badge {padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold;}
+.status-active {background-color: #4CAF50; color: white;}
+.status-triggered {background-color: #FF9800; color: white;}
+.status-inactive {background-color: #666; color: white;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -377,7 +432,8 @@ if selected_symbol != "Select a symbol...":
                     "criteria": criteria_choice,
                     "condition": condition_choice,
                     "threshold": threshold_value,
-                    "status": "Active"
+                    "status": "Active",
+                    "triggered_at": None
                 }
                 st.session_state.alerts.append(new_alert)
                 
@@ -402,9 +458,9 @@ st.subheader("Alert Management")
 
 # Separate active and inactive alerts
 active_alerts = [alert for alert in st.session_state.alerts if alert.get("status", "Active") == "Active"]
-inactive_alerts = [alert for alert in st.session_state.alerts if alert.get("status", "Active") == "Inactive"]
+inactive_alerts = [alert for alert in st.session_state.alerts if alert.get("status", "Active") in ["Inactive", "Triggered"]]
 
-# Show alerts in two columns
+# Show alerts in two columns (keeping original layout)
 alert_col1, alert_col2 = st.columns(2)
 
 # Active Alerts Column
@@ -433,19 +489,28 @@ with alert_col1:
     else:
         st.write("No active alerts.")
 
-# Inactive Alerts Column  
+# Inactive/Triggered Alerts Column  
 with alert_col2:
-    st.markdown("### ⏸️ Inactive Alerts")
+    st.markdown("### ⏸️ Triggered/Inactive Alerts")
     if inactive_alerts:
         for i, alert in enumerate(st.session_state.alerts):
-            if alert.get("status", "Active") == "Inactive":
+            if alert.get("status", "Active") in ["Inactive", "Triggered"]:
                 cols = st.columns([4, 1, 1])
                 alert_text = f"{alert['symbol']} | {alert['criteria']} {alert['condition']} {alert['threshold']}"
-                cols[0].write(alert_text)
+                
+                # Show status badge and triggered time if available
+                status = alert.get("status", "Inactive")
+                triggered_time = alert.get("triggered_at", "")
+                if status == "Triggered" and triggered_time:
+                    cols[0].write(f"🔥 {alert_text}")
+                    cols[0].caption(f"Triggered: {triggered_time}")
+                else:
+                    cols[0].write(alert_text)
                 
                 # Reactivate button
                 if cols[1].button("▶️", key=f"reactivate_{alert['symbol']}_{i}", help="Reactivate"):
                     st.session_state.alerts[i]["status"] = "Active"
+                    st.session_state.alerts[i]["triggered_at"] = None
                     if update_google_sheet():
                         st.success("Alert reactivated!")
                     st.experimental_rerun()
@@ -457,7 +522,7 @@ with alert_col2:
                         st.success("Alert deleted!")
                     st.experimental_rerun()
     else:
-        st.write("No inactive alerts.")
+        st.write("No triggered/inactive alerts.")
 
 # Manual sync buttons (for backup/manual control)
 sync_col1, sync_col2 = st.columns([1, 1])
@@ -474,19 +539,3 @@ with sync_col2:
             st.success("✅ Force synced to Sheets!")
         else:
             st.error("❌ Sync failed")
-
-# --- GOOGLE SHEETS CONNECTION STATUS ---
-st.sidebar.subheader("Google Sheets Status")
-try:
-    gc = get_google_client()
-    if gc:
-        sheet = gc.open_by_key(GOOGLE_SHEET_ID)
-        st.sidebar.success(f"✅ Connected to: {sheet.title}")
-        st.sidebar.info(f"📊 Total alerts: {len(st.session_state.alerts)}")
-    else:
-        st.sidebar.error("❌ Connection failed")
-except Exception as e:
-    st.sidebar.error(f"❌ Error: {str(e)[:50]}...")
-
-# Show sheet link
-st.sidebar.markdown(f"[📋 Open Google Sheet](https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit)")
