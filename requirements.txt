@@ -4,4 +4,4 @@ streamlit
 streamlit-autorefresh
 pandas
 requests
-
+gspread
