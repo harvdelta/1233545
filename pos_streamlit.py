@@ -10,8 +10,8 @@ from streamlit_autorefresh import st_autorefresh
 import gspread
 import json
 
-# Auto-refresh every 3 seconds
-st_autorefresh(interval=3000)
+# Auto-refresh every 15 seconds
+st_autorefresh(interval=15000)
 st.set_page_config(layout="wide")
 
 # ---------- CONFIG ----------
@@ -63,18 +63,19 @@ def load_alerts_from_sheet():
         # Parse alerts (skip header row)
         loaded_alerts = []
         for row in values[1:]:  # Skip header
-            if len(row) >= 4 and row[0]:  # Make sure row has data
+            if len(row) >= 5 and row[0]:  # Make sure row has data (now 5 columns)
                 try:
                     loaded_alerts.append({
                         "symbol": row[0],
                         "criteria": row[1],
                         "condition": row[2],
-                        "threshold": float(row[3])
+                        "threshold": float(row[3]),
+                        "status": row[4] if len(row) > 4 else "Active"  # Default to Active
                     })
                 except (ValueError, IndexError):
                     continue  # Skip invalid rows
         
-        # Update session state
+        # Update session state with all alerts (active and inactive)
         st.session_state.alerts = loaded_alerts
         return True
         
@@ -98,17 +99,18 @@ def update_google_sheet():
         except gspread.WorksheetNotFound:
             worksheet = sheet.add_worksheet(title="Delta Alerts", rows="100", cols="10")
         
-        # Prepare data with headers
-        headers = ["Symbol", "Criteria", "Condition", "Threshold"]
+        # Prepare data with headers (now includes Status column)
+        headers = ["Symbol", "Criteria", "Condition", "Threshold", "Status"]
         data = [headers]
         
-        # Add current alerts
+        # Add current alerts (both active and inactive)
         for alert in st.session_state.alerts:
             row = [
                 alert["symbol"],
                 alert["criteria"], 
                 alert["condition"],
-                alert["threshold"]
+                alert["threshold"],
+                alert.get("status", "Active")  # Default to Active if no status
             ]
             data.append(row)
         
@@ -276,6 +278,9 @@ if "edit_symbol" not in st.session_state:
 if "sheets_updated" not in st.session_state:
     st.session_state.sheets_updated = False
 
+# Load alerts from Google Sheets on every refresh (auto-sync)
+load_alerts_from_sheet()
+
 # ---------- ALERT CHECK ----------
 for alert in st.session_state.alerts:
     row = df[df["Symbol"] == alert["symbol"]]
@@ -353,12 +358,13 @@ if selected_symbol != "Select a symbol...":
         threshold_value = st.number_input("Threshold", format="%.2f")
         
         if st.form_submit_button("💾 Save Alert"):
-            # Add alert to session state
+            # Add alert to session state with Active status
             st.session_state.alerts.append({
                 "symbol": selected_symbol,
                 "criteria": criteria_choice,
                 "condition": condition_choice,
-                "threshold": threshold_value
+                "threshold": threshold_value,
+                "status": "Active"
             })
             
             # Update Google Sheets
@@ -374,31 +380,80 @@ else:
     right_col.info("👆 Select a symbol above to create an alert")
 
 # --- ACTIVE ALERTS ---
-st.subheader("Active Alerts")
+st.subheader("Alert Management")
 
-# Show Google Sheets status
-col1, col2 = st.columns([3, 1])
-with col1:
-    if st.session_state.alerts:
+# Separate active and inactive alerts
+active_alerts = [alert for alert in st.session_state.alerts if alert.get("status", "Active") == "Active"]
+inactive_alerts = [alert for alert in st.session_state.alerts if alert.get("status", "Active") == "Inactive"]
+
+# Show alerts in two columns
+alert_col1, alert_col2 = st.columns(2)
+
+# Active Alerts Column
+with alert_col1:
+    st.markdown("### 🟢 Active Alerts")
+    if active_alerts:
         for i, alert in enumerate(st.session_state.alerts):
-            cols = st.columns([5, 1])
-            alert_text = f"{alert['symbol']} | {alert['criteria']} {alert['condition']} {alert['threshold']}"
-            cols[0].write(alert_text)
-            if cols[1].button("❌", key=f"remove_alert_{i}"):
-                st.session_state.alerts.pop(i)
-                # Update Google Sheets after deletion
-                if update_google_sheet():
-                    st.success("Alert deleted and Google Sheets updated!")
-                else:
-                    st.error("Alert deleted locally, but failed to update Google Sheets")
-                st.experimental_rerun()
+            if alert.get("status", "Active") == "Active":
+                cols = st.columns([4, 1, 1])
+                alert_text = f"{alert['symbol']} | {alert['criteria']} {alert['condition']} {alert['threshold']}"
+                cols[0].write(alert_text)
+                
+                # Deactivate button
+                if cols[1].button("⏸️", key=f"deactivate_alert_{i}", help="Deactivate"):
+                    st.session_state.alerts[i]["status"] = "Inactive"
+                    if update_google_sheet():
+                        st.success("Alert deactivated!")
+                    st.experimental_rerun()
+                
+                # Delete button
+                if cols[2].button("❌", key=f"delete_alert_{i}", help="Delete"):
+                    st.session_state.alerts.pop(i)
+                    if update_google_sheet():
+                        st.success("Alert deleted!")
+                    st.experimental_rerun()
     else:
         st.write("No active alerts.")
 
-with col2:
-    if st.button("🔄 Sync to Sheets"):
+# Inactive Alerts Column  
+with alert_col2:
+    st.markdown("### ⏸️ Inactive Alerts")
+    if inactive_alerts:
+        for i, alert in enumerate(st.session_state.alerts):
+            if alert.get("status", "Active") == "Inactive":
+                cols = st.columns([4, 1, 1])
+                alert_text = f"{alert['symbol']} | {alert['criteria']} {alert['condition']} {alert['threshold']}"
+                cols[0].write(alert_text)
+                
+                # Reactivate button
+                if cols[1].button("▶️", key=f"reactivate_alert_{i}", help="Reactivate"):
+                    st.session_state.alerts[i]["status"] = "Active"
+                    if update_google_sheet():
+                        st.success("Alert reactivated!")
+                    st.experimental_rerun()
+                
+                # Delete button
+                if cols[2].button("❌", key=f"delete_inactive_alert_{i}", help="Delete"):
+                    st.session_state.alerts.pop(i)
+                    if update_google_sheet():
+                        st.success("Alert deleted!")
+                    st.experimental_rerun()
+    else:
+        st.write("No inactive alerts.")
+
+# Manual sync buttons (for backup/manual control)
+sync_col1, sync_col2 = st.columns([1, 1])
+with sync_col1:
+    if st.button("🔄 Force Sync from Sheets"):
+        if load_alerts_from_sheet():
+            st.success("✅ Force loaded from Sheets!")
+        else:
+            st.error("❌ Load failed")
+
+with sync_col2:
+    if st.button("📤 Force Sync to Sheets"):
         if update_google_sheet():
-            st.success("✅ Synced!")
+            st.success("✅ Force synced to Sheets!")
         else:
             st.error("❌ Sync failed")
 
