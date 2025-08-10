@@ -209,7 +209,7 @@ def create_alert_id(alert):
     """Create unique ID for alert tracking"""
     return f"{alert['symbol']}_{alert['criteria']}_{alert['condition']}_{alert['threshold']}"
 
-def check_and_trigger_alerts(df):
+def check_and_trigger_alerts(df, total_upnl):
     """Check alerts and trigger only once, then auto-deactivate"""
     alerts_triggered = 0
     
@@ -217,17 +217,27 @@ def check_and_trigger_alerts(df):
         # Only check active alerts
         if alert.get("status", "Active") != "Active":
             continue
-            
-        # Find matching row in dataframe
-        row = df[df["Symbol"] == alert["symbol"]]
-        if row.empty:
-            continue
-            
-        # Get current value
-        val_str = row.iloc[0].get(alert["criteria"])
-        try:
-            current_value = float(val_str)
-        except:
+        
+        current_value = None
+        symbol = alert["symbol"]
+        
+        # Handle Total P&L alerts
+        if symbol == "TOTAL_PNL":
+            current_value = total_upnl
+        else:
+            # Handle individual position alerts
+            row = df[df["Symbol"] == symbol]
+            if row.empty:
+                continue
+                
+            # Get current value
+            val_str = row.iloc[0].get(alert["criteria"])
+            try:
+                current_value = float(val_str)
+            except:
+                continue
+        
+        if current_value is None:
             continue
         
         # Check if condition is met
@@ -240,17 +250,26 @@ def check_and_trigger_alerts(df):
         # If condition is met, trigger alert and deactivate
         if condition_met:
             # Create alert message
-            alert_msg = (f"🚨 ALERT TRIGGERED!\n"
-                        f"Symbol: {alert['symbol']}\n"
-                        f"Condition: {alert['criteria']} {alert['condition']} {alert['threshold']}\n"
-                        f"Current Value: {current_value:.2f}\n"
-                        f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            if symbol == "TOTAL_PNL":
+                alert_msg = (f"🚨 TOTAL P&L ALERT TRIGGERED!\n"
+                            f"Condition: Total P&L {alert['condition']} {alert['threshold']}\n"
+                            f"Current Total P&L: {current_value:.2f} USD\n"
+                            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                alert_msg = (f"🚨 POSITION ALERT TRIGGERED!\n"
+                            f"Symbol: {symbol}\n"
+                            f"Condition: {alert['criteria']} {alert['condition']} {alert['threshold']}\n"
+                            f"Current Value: {current_value:.2f}\n"
+                            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
             # Send telegram notification
             send_telegram_message(alert_msg)
             
             # Show alert in Streamlit
-            st.error(f"🚨 ALERT: {alert['symbol']} - {alert['criteria']} is {current_value:.2f} ({alert['condition']} {alert['threshold']})")
+            if symbol == "TOTAL_PNL":
+                st.error(f"🚨 TOTAL P&L ALERT: {current_value:.2f} USD ({alert['condition']} {alert['threshold']})")
+            else:
+                st.error(f"🚨 ALERT: {symbol} - {alert['criteria']} is {current_value:.2f} ({alert['condition']} {alert['threshold']})")
             
             # Auto-deactivate the alert
             st.session_state.alerts[i]["status"] = "Triggered"
@@ -331,6 +350,19 @@ df = pd.DataFrame(rows)
 # Sort by absolute UPNL
 df = df.sort_values(by="UPNL (USD)", key=lambda x: x.map(lambda v: abs(float(v)) if v else -999999), ascending=False).reset_index(drop=True)
 
+# ---------- CALCULATE TOTAL P&L ----------
+total_upnl = 0
+valid_upnl_count = 0
+for _, row in df.iterrows():
+    upnl_str = row.get("UPNL (USD)")
+    if upnl_str:
+        try:
+            upnl_val = float(upnl_str)
+            total_upnl += upnl_val
+            valid_upnl_count += 1
+        except:
+            continue
+
 # ---------- STATE ----------
 if "alerts" not in st.session_state:
     st.session_state.alerts = []
@@ -344,7 +376,7 @@ load_alerts_from_sheet()
 
 # ---------- SMART ALERT CHECK (FIRE ONCE ONLY) ----------
 # This replaces your old alert checking logic
-alerts_triggered = check_and_trigger_alerts(df)
+alerts_triggered = check_and_trigger_alerts(df, total_upnl)
 
 # ---------- CSS ----------
 st.markdown("""
@@ -366,6 +398,88 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------- LAYOUT ----------
+# Show Total P&L at the top
+total_col1, total_col2, total_col3 = st.columns([2, 2, 1])
+
+with total_col1:
+    st.markdown("### 💰 Total Portfolio P&L")
+    
+with total_col2:
+    # Display total P&L with color coding
+    if total_upnl > 0:
+        st.markdown(f"<div style='background:#4CAF50;padding:15px;border-radius:10px;text-align:center;'>"
+                   f"<h2 style='color:white;margin:0;'>+${total_upnl:.2f}</h2>"
+                   f"<p style='color:white;margin:0;opacity:0.9;'>Positions: {valid_upnl_count}</p>"
+                   f"</div>", unsafe_allow_html=True)
+    elif total_upnl < 0:
+        st.markdown(f"<div style='background:#F44336;padding:15px;border-radius:10px;text-align:center;'>"
+                   f"<h2 style='color:white;margin:0;'>${total_upnl:.2f}</h2>"
+                   f"<p style='color:white;margin:0;opacity:0.9;'>Positions: {valid_upnl_count}</p>"
+                   f"</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div style='background:#666;padding:15px;border-radius:10px;text-align:center;'>"
+                   f"<h2 style='color:white;margin:0;'>${total_upnl:.2f}</h2>"
+                   f"<p style='color:white;margin:0;opacity:0.9;'>Positions: {valid_upnl_count}</p>"
+                   f"</div>", unsafe_allow_html=True)
+
+with total_col3:
+    # Quick Total P&L alert button
+    if st.button("🔔 Set Total P&L Alert", help="Set alert on total portfolio P&L"):
+        st.session_state.show_total_pnl_form = True
+
+# Show Total P&L Alert Form
+if st.session_state.get("show_total_pnl_form", False):
+    with st.expander("🎯 Total P&L Alert Setup", expanded=True):
+        pnl_col1, pnl_col2, pnl_col3, pnl_col4 = st.columns([2, 2, 2, 2])
+        
+        with pnl_col1:
+            pnl_condition = st.selectbox("Condition", [">=", "<="], key="pnl_condition")
+        
+        with pnl_col2:
+            pnl_threshold = st.number_input("Threshold ($)", format="%.2f", value=0.0, key="pnl_threshold")
+        
+        with pnl_col3:
+            if st.button("💾 Save Total P&L Alert"):
+                if pnl_threshold != 0.0:
+                    # Check for duplicate
+                    duplicate = False
+                    for existing_alert in st.session_state.alerts:
+                        if (existing_alert["symbol"] == "TOTAL_PNL" and 
+                            existing_alert["condition"] == pnl_condition and
+                            existing_alert["threshold"] == pnl_threshold):
+                            duplicate = True
+                            break
+                    
+                    if not duplicate:
+                        new_alert = {
+                            "symbol": "TOTAL_PNL",
+                            "criteria": "Total P&L",
+                            "condition": pnl_condition,
+                            "threshold": pnl_threshold,
+                            "status": "Active",
+                            "triggered_at": None
+                        }
+                        st.session_state.alerts.append(new_alert)
+                        
+                        if update_google_sheet():
+                            st.success("✅ Total P&L alert saved!")
+                        else:
+                            st.error("❌ Failed to sync to sheets")
+                        
+                        st.session_state.show_total_pnl_form = False
+                        st.experimental_rerun()
+                    else:
+                        st.warning("⚠️ This Total P&L alert already exists!")
+                else:
+                    st.warning("⚠️ Please enter a non-zero threshold!")
+        
+        with pnl_col4:
+            if st.button("❌ Cancel"):
+                st.session_state.show_total_pnl_form = False
+                st.experimental_rerun()
+
+st.markdown("---")
+
 left_col, right_col = st.columns([4, 1])
 
 # --- LEFT: TABLE ---
